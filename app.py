@@ -1,6 +1,7 @@
 import streamlit as st
 import fitz  # PyMuPDF
 import google.generativeai as genai
+import requests
 import time
 import json
 
@@ -17,14 +18,16 @@ st.caption("Upload a PDF → Generate Quiz Questions using Google Gemini")
 # -------------------- 🔴 PLACEHOLDER 1 --------------------
 # CHANGE THIS IN STREAMLIT SECRETS (NOT HERE)
 # GEMINI_API_KEY = "PASTE_YOUR_API_KEY"
+# HF_API_KEY = "PASTE_YOUR_HUGGINGFACE_KEY"
 # ----------------------------------------------------
 
-# -------------------- LOAD API KEY SAFELY --------------------
+# -------------------- LOAD API KEYS SAFELY --------------------
 try:
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+    HF_API_KEY = st.secrets["HF_API_KEY"]
     genai.configure(api_key=GEMINI_API_KEY)
 except Exception as e:
-    st.error("❌ Gemini API key not found. Add it in Streamlit Secrets.")
+    st.error("❌ API keys not found. Add them in Streamlit Secrets.")
     st.stop()
 
 # -------------------- FUNCTIONS --------------------
@@ -50,18 +53,10 @@ def chunk_text(text, chunk_size=3000):
     return [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
 
 
-def generate_questions(chunks):
+# -------------------- GEMINI FUNCTION --------------------
+def gemini_generate(chunk):
     model = genai.GenerativeModel("gemini-1.5-flash")
-
-    questions = []
-
-    progress = st.progress(0)
-    status = st.empty()
-
-    for i, chunk in enumerate(chunks):
-        status.warning(f"🧠 Generating questions from chunk {i+1}/{len(chunks)}")
-
-        prompt = f"""
+    prompt = f"""
 You are an exam question generator.
 
 From the text below, generate 3 multiple-choice questions.
@@ -82,14 +77,66 @@ Return STRICT JSON format like:
 TEXT:
 {chunk}
 """
+    response = model.generate_content(prompt)
+    return response.text
 
-        response = model.generate_content(prompt)
+
+# -------------------- HUGGINGFACE FALLBACK FUNCTION --------------------
+def hf_generate(chunk):
+    API_URL = "https://api-inference.huggingface.co/models/google/flan-t5-large"
+    headers = {"Authorization": f"Bearer {HF_API_KEY}"}
+    payload = {
+        "inputs": f"""
+You are an exam question generator.
+
+From the text below, generate 3 multiple-choice questions.
+Each question must have:
+- question
+- 4 options
+- correct_answer
+
+Return STRICT JSON format like:
+[
+  {{
+    "question": "",
+    "options": ["", "", "", ""],
+    "correct_answer": ""
+  }}
+]
+
+TEXT:
+{chunk}
+"""
+    }
+    response = requests.post(API_URL, headers=headers, json=payload)
+    response.raise_for_status()
+    return json.loads(response.json()[0]["generated_text"])
+
+
+# -------------------- SMART AUTO-FALLBACK --------------------
+def generate_questions(chunks):
+    questions = []
+
+    progress = st.progress(0)
+    status = st.empty()
+
+    for i, chunk in enumerate(chunks):
+        status.info(f"Processing chunk {i+1}/{len(chunks)}")
 
         try:
-            parsed = json.loads(response.text)
+            st.info("⚡ Using Gemini AI...")
+            text = gemini_generate(chunk)
+            parsed = json.loads(text)
             questions.extend(parsed)
-        except:
-            st.error("❌ Failed to parse AI response. Skipping this chunk.")
+
+        except Exception as e:
+            st.warning("⚠️ Gemini failed. Switching to HuggingFace backup AI...")
+            st.error(str(e))
+            try:
+                parsed = hf_generate(chunk)
+                questions.extend(parsed)
+            except Exception as hf_error:
+                st.error(f"❌ HuggingFace also failed: {str(hf_error)}")
 
         progress.progress((i + 1) / len(chunks))
         time.sleep(0.1)
@@ -115,7 +162,7 @@ if uploaded_file:
 
             chunks = chunk_text(text)
 
-            with st.spinner("🧠 Generating quiz questions using Gemini..."):
+            with st.spinner("🧠 Generating quiz questions..."):
                 questions = generate_questions(chunks)
 
             st.success(f"🎉 Generated {len(questions)} questions")
