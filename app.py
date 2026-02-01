@@ -17,7 +17,7 @@ st.caption("Upload a PDF → Generate Quiz Questions using Google Gemini")
 
 # -------------------- 🔴 PLACEHOLDER 1 --------------------
 # CHANGE THIS IN STREAMLIT SECRETS (NOT HERE)
-# GEMINI_API_KEY = "PASTE_YOUR_API_KEY"
+# GEMINI_API_KEY = "PASTE_YOUR_GEMINI_KEY"
 # HF_API_KEY = "PASTE_YOUR_HUGGINGFACE_KEY"
 # ----------------------------------------------------
 
@@ -55,7 +55,7 @@ def chunk_text(text, chunk_size=3000):
 
 # -------------------- GEMINI FUNCTION --------------------
 def gemini_generate(chunk):
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    model = genai.GenerativeModel("gemini-pro")  # ✅ valid model
     prompt = f"""
 You are an exam question generator.
 
@@ -83,7 +83,7 @@ TEXT:
 
 # -------------------- HUGGINGFACE FALLBACK FUNCTION --------------------
 def hf_generate(chunk):
-    API_URL = "https://api-inference.huggingface.co/models/google/flan-t5-large"
+    API_URL = "https://api-inference.huggingface.co/models/google/flan-t5-small"  # ✅ working free model
     headers = {"Authorization": f"Bearer {HF_API_KEY}"}
     payload = {
         "inputs": f"""
