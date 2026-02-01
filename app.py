@@ -1,9 +1,9 @@
 import streamlit as st
 import fitz  # PyMuPDF
-import google.generativeai as genai
 import requests
 import time
 import json
+import openai
 
 # -------------------- UI CONFIG --------------------
 st.set_page_config(
@@ -13,19 +13,13 @@ st.set_page_config(
 )
 
 st.title("📘 PDF to Quiz Generator")
-st.caption("Upload a PDF → Generate Quiz Questions using Google Gemini")
-
-# -------------------- 🔴 PLACEHOLDER 1 --------------------
-# CHANGE THIS IN STREAMLIT SECRETS (NOT HERE)
-# GEMINI_API_KEY = "PASTE_YOUR_GEMINI_KEY"
-# HF_API_KEY = "PASTE_YOUR_HUGGINGFACE_KEY"
-# ----------------------------------------------------
+st.caption("Upload a PDF → Generate Quiz Questions using OpenAI GPT")
 
 # -------------------- LOAD API KEYS SAFELY --------------------
 try:
-    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+    OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
     HF_API_KEY = st.secrets["HF_API_KEY"]
-    genai.configure(api_key=GEMINI_API_KEY)
+    openai.api_key = OPENAI_API_KEY
 except Exception as e:
     st.error("❌ API keys not found. Add them in Streamlit Secrets.")
     st.stop()
@@ -33,6 +27,7 @@ except Exception as e:
 # -------------------- FUNCTIONS --------------------
 
 def extract_text_from_pdf(pdf_file):
+    """Extract text from PDF using PyMuPDF"""
     text = ""
     pdf = fitz.open(stream=pdf_file.read(), filetype="pdf")
     total_pages = len(pdf)
@@ -48,18 +43,17 @@ def extract_text_from_pdf(pdf_file):
 
     return text
 
-
 def chunk_text(text, chunk_size=3000):
+    """Split text into smaller chunks"""
     return [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
 
-
-# -------------------- GEMINI FUNCTION --------------------
-def gemini_generate(chunk):
-    model = genai.GenerativeModel("gemini-pro")  # ✅ valid model
+# -------------------- OPENAI FUNCTION --------------------
+def openai_generate(chunk, num_questions=3):
+    """Generate quiz questions using OpenAI GPT"""
     prompt = f"""
 You are an exam question generator.
 
-From the text below, generate 3 multiple-choice questions.
+From the text below, generate {num_questions} multiple-choice questions.
 Each question must have:
 - question
 - 4 options
@@ -77,13 +71,24 @@ Return STRICT JSON format like:
 TEXT:
 {chunk}
 """
-    response = model.generate_content(prompt)
-    return response.text
+    response = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.5,
+        max_tokens=1000
+    )
+    text = response['choices'][0]['message']['content']
 
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        # fallback dummy questions if GPT output is invalid
+        st.warning("⚠️ GPT response not valid JSON, using sample questions")
+        return [{"question": f"Sample Q{i+1}", "options": ["A","B","C","D"], "correct_answer": "A"} for i in range(num_questions)]
 
 # -------------------- HUGGINGFACE FALLBACK FUNCTION --------------------
 def hf_generate(chunk):
-    API_URL = "https://api-inference.huggingface.co/models/google/flan-t5-small"  # ✅ working free model
+    API_URL = "https://api-inference.huggingface.co/models/google/flan-t5-small"
     headers = {"Authorization": f"Bearer {HF_API_KEY}"}
     payload = {
         "inputs": f"""
@@ -112,7 +117,6 @@ TEXT:
     response.raise_for_status()
     return json.loads(response.json()[0]["generated_text"])
 
-
 # -------------------- SMART AUTO-FALLBACK --------------------
 def generate_questions(chunks):
     questions = []
@@ -124,13 +128,12 @@ def generate_questions(chunks):
         status.info(f"Processing chunk {i+1}/{len(chunks)}")
 
         try:
-            st.info("⚡ Using Gemini AI...")
-            text = gemini_generate(chunk)
-            parsed = json.loads(text)
+            st.info("⚡ Using OpenAI GPT...")
+            parsed = openai_generate(chunk)
             questions.extend(parsed)
 
         except Exception as e:
-            st.warning("⚠️ Gemini failed. Switching to HuggingFace backup AI...")
+            st.warning("⚠️ OpenAI GPT failed. Switching to HuggingFace backup AI...")
             st.error(str(e))
             try:
                 parsed = hf_generate(chunk)
@@ -142,7 +145,6 @@ def generate_questions(chunks):
         time.sleep(0.1)
 
     return questions
-
 
 # -------------------- UI FLOW --------------------
 
@@ -180,3 +182,4 @@ if uploaded_file:
 
         except Exception as e:
             st.error(f"🔥 Exact Error: {str(e)}")
+
