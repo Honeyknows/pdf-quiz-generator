@@ -1,9 +1,11 @@
 import streamlit as st
 import fitz  # PyMuPDF
+import google.generativeai as genai
 import requests
 import time
 import json
-import openai
+import re
+from io import BytesIO
 
 # -------------------- UI CONFIG --------------------
 st.set_page_config(
@@ -13,23 +15,29 @@ st.set_page_config(
 )
 
 st.title("📘 PDF to Quiz Generator")
-st.caption("Upload a PDF → Generate Quiz Questions using OpenAI GPT")
+st.caption("Upload a PDF → Generate Quiz Questions using Google Gemini")
 
 # -------------------- LOAD API KEYS SAFELY --------------------
-try:
-    OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
-    HF_API_KEY = st.secrets["HF_API_KEY"]
-    openai.api_key = OPENAI_API_KEY
-except Exception as e:
-    st.error("❌ API keys not found. Add them in Streamlit Secrets.")
+GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY")
+HF_API_KEY = st.secrets.get("HF_API_KEY")  # optional fallback
+
+if not GEMINI_API_KEY:
+    st.error("❌ GEMINI_API_KEY not found. Add it in Streamlit Secrets.")
     st.stop()
+
+genai.configure(api_key=GEMINI_API_KEY)
+# create and reuse model instance where possible
+try:
+    GEMINI_MODEL = genai.GenerativeModel("gemini-pro")
+except Exception:
+    GEMINI_MODEL = None
 
 # -------------------- FUNCTIONS --------------------
 
 def extract_text_from_pdf(pdf_file):
-    """Extract text from PDF using PyMuPDF"""
     text = ""
-    pdf = fitz.open(stream=pdf_file.read(), filetype="pdf")
+    pdf_bytes = pdf_file.read()
+    pdf = fitz.open(stream=pdf_bytes, filetype="pdf")
     total_pages = len(pdf)
 
     progress = st.progress(0)
@@ -43,52 +51,48 @@ def extract_text_from_pdf(pdf_file):
 
     return text
 
+
 def chunk_text(text, chunk_size=3000):
-    """Split text into smaller chunks"""
     return [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
 
-# -------------------- OPENAI FUNCTION --------------------
-def openai_generate(chunk, num_questions=3):
-    """Generate quiz questions using OpenAI GPT"""
+
+# -------------------- GEMINI FUNCTION --------------------
+def gemini_generate(chunk):
+    if GEMINI_MODEL is None:
+        raise RuntimeError("Gemini model unavailable")
+
     prompt = f"""
 You are an exam question generator.
 
-From the text below, generate {num_questions} multiple-choice questions.
+From the text below, generate 3 multiple-choice questions.
 Each question must have:
 - question
 - 4 options
 - correct_answer
 
-Return STRICT JSON format like:
+Return ONLY a JSON array (no surrounding text). Example:
 [
-  {{
+  {
     "question": "",
     "options": ["", "", "", ""],
     "correct_answer": ""
-  }}
+  }
 ]
 
 TEXT:
 {chunk}
 """
-    response = openai.ChatCompletion.create(
-        model="gpt-3.5-turbo",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.5,
-        max_tokens=1000
-    )
-    text = response['choices'][0]['message']['content']
+    response = GEMINI_MODEL.generate_content(prompt)
+    text = getattr(response, "text", None) or getattr(response, "content", None) or str(response)
+    return text
 
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        # fallback dummy questions if GPT output is invalid
-        st.warning("⚠️ GPT response not valid JSON, using sample questions")
-        return [{"question": f"Sample Q{i+1}", "options": ["A","B","C","D"], "correct_answer": "A"} for i in range(num_questions)]
 
 # -------------------- HUGGINGFACE FALLBACK FUNCTION --------------------
 def hf_generate(chunk):
-    API_URL = "https://api-inference.huggingface.co/models/google/flan-t5-small"
+    if not HF_API_KEY:
+        raise RuntimeError("HF API key not configured for fallback")
+
+    API_URL = "https://router.huggingface.co/v1"
     headers = {"Authorization": f"Bearer {HF_API_KEY}"}
     payload = {
         "inputs": f"""
@@ -100,22 +104,34 @@ Each question must have:
 - 4 options
 - correct_answer
 
-Return STRICT JSON format like:
-[
-  {{
-    "question": "",
-    "options": ["", "", "", ""],
-    "correct_answer": ""
-  }}
-]
+Return ONLY a JSON array (no surrounding text).
 
 TEXT:
 {chunk}
 """
     }
-    response = requests.post(API_URL, headers=headers, json=payload)
-    response.raise_for_status()
-    return json.loads(response.json()[0]["generated_text"])
+
+    resp = requests.post(API_URL, headers=headers, json=payload, timeout=60)
+    resp.raise_for_status()
+
+    resp_json = resp.json()
+    # handle various response shapes
+    if isinstance(resp_json, list) and len(resp_json) and isinstance(resp_json[0], dict):
+        gen_text = resp_json[0].get("generated_text", "")
+    elif isinstance(resp_json, dict) and "generated_text" in resp_json:
+        gen_text = resp_json.get("generated_text", "")
+    else:
+        gen_text = resp.text
+
+    # try strict JSON first, else try to extract JSON array substring
+    try:
+        return json.loads(gen_text)
+    except Exception:
+        m = re.search(r"(\[\s*\{.*?\}\s*\])", gen_text, re.S)
+        if m:
+            return json.loads(m.group(1))
+        raise
+
 
 # -------------------- SMART AUTO-FALLBACK --------------------
 def generate_questions(chunks):
@@ -127,27 +143,45 @@ def generate_questions(chunks):
     for i, chunk in enumerate(chunks):
         status.info(f"Processing chunk {i+1}/{len(chunks)}")
 
+        # try Gemini first
         try:
-            st.info("⚡ Using OpenAI GPT...")
-            parsed = openai_generate(chunk)
-            questions.extend(parsed)
+            st.info("⚡ Using Gemini AI...")
+            text = gemini_generate(chunk)
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                # try to extract JSON array substring
+                m = re.search(r"(\[\s*\{.*?\}\s*\])", text, re.S)
+                if m:
+                    parsed = json.loads(m.group(1))
+                else:
+                    raise
+
+            if isinstance(parsed, list):
+                questions.extend(parsed)
+            else:
+                raise ValueError("Parsed Gemini output is not a list")
 
         except Exception as e:
-            st.warning("⚠️ OpenAI GPT failed. Switching to HuggingFace backup AI...")
+            st.warning("⚠️ Gemini failed. Switching to HuggingFace backup AI...")
             st.error(str(e))
-            try:
-                parsed = hf_generate(chunk)
-                questions.extend(parsed)
-            except Exception as hf_error:
-                st.error(f"❌ HuggingFace also failed: {str(hf_error)}")
+            if HF_API_KEY:
+                try:
+                    parsed = hf_generate(chunk)
+                    if isinstance(parsed, list):
+                        questions.extend(parsed)
+                except Exception as hf_error:
+                    st.error(f"❌ HuggingFace also failed: {str(hf_error)}")
+            else:
+                st.error("❌ No HuggingFace API key configured for fallback.")
 
         progress.progress((i + 1) / len(chunks))
         time.sleep(0.1)
 
     return questions
 
-# -------------------- UI FLOW --------------------
 
+# -------------------- UI FLOW --------------------
 uploaded_file = st.file_uploader("📂 Upload your PDF", type=["pdf"])
 
 if uploaded_file:
@@ -172,10 +206,14 @@ if uploaded_file:
             # Show preview
             st.subheader("📝 Preview Questions")
             for i, q in enumerate(questions[:5]):
-                st.markdown(f"**Q{i+1}: {q['question']}**")
-                for opt in q["options"]:
+                question_text = q.get("question", "")
+                options = q.get("options", [])
+                correct = q.get("correct_answer", "")
+
+                st.markdown(f"**Q{i+1}: {question_text}**")
+                for opt in options:
                     st.markdown(f"- {opt}")
-                st.markdown(f"✅ Correct: `{q['correct_answer']}`")
+                st.markdown(f"✅ Correct: `{correct}`")
                 st.divider()
 
             st.info("ℹ️ Google Form creation can be added next.")
