@@ -92,6 +92,7 @@ def hf_generate(chunk):
     if not HF_API_KEY:
         raise RuntimeError("HF API key not configured for fallback")
 
+    # Use the HF inference endpoint for model text generation
     API_URL = "https://router.huggingface.co/v1"
     headers = {"Authorization": f"Bearer {HF_API_KEY}"}
     payload = {
@@ -130,7 +131,8 @@ TEXT:
         m = re.search(r"(\[\s*\{.*?\}\s*\])", gen_text, re.S)
         if m:
             return json.loads(m.group(1))
-        raise
+        # as a last resort, return the raw text so caller can inspect
+        return gen_text
 
 
 # -------------------- SMART AUTO-FALLBACK --------------------
@@ -155,10 +157,27 @@ def generate_questions(chunks):
                 if m:
                     parsed = json.loads(m.group(1))
                 else:
+                    # couldn't parse JSON — surface raw response for debugging and skip
+                    st.error("Gemini raw response (non-JSON):")
+                    st.code(text[:1000])
                     raise
 
+            # if parsed is a list of strings (model returned JSON array of JSON-strings), normalize
             if isinstance(parsed, list):
-                questions.extend(parsed)
+                for item in parsed:
+                    if isinstance(item, dict):
+                        questions.append(item)
+                    elif isinstance(item, str):
+                        # try to parse the string as JSON
+                        try:
+                            maybe = json.loads(item)
+                            if isinstance(maybe, dict):
+                                questions.append(maybe)
+                                continue
+                        except Exception:
+                            pass
+                        # fallback: store as question text
+                        questions.append({"question": item, "options": [], "correct_answer": ""})
             else:
                 raise ValueError("Parsed Gemini output is not a list")
 
