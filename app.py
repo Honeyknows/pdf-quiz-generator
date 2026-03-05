@@ -1,5 +1,5 @@
 import streamlit as st
-import fitz  # PyMuPDF
+import fitz
 import google.generativeai as genai
 import requests
 import time
@@ -7,7 +7,6 @@ import json
 import re
 from io import BytesIO
 
-# -------------------- UI CONFIG --------------------
 st.set_page_config(
     page_title="PDF to Quiz Generator",
     page_icon="📘",
@@ -17,22 +16,20 @@ st.set_page_config(
 st.title("📘 PDF to Quiz Generator")
 st.caption("Upload a PDF → Generate Quiz Questions using Google Gemini")
 
-# -------------------- LOAD API KEYS SAFELY --------------------
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY")
-HF_API_KEY = st.secrets.get("HF_API_KEY")  # optional fallback
+HF_API_KEY = st.secrets.get("HF_API_KEY") 
 
 if not GEMINI_API_KEY:
     st.error("❌ GEMINI_API_KEY not found. Add it in Streamlit Secrets.")
     st.stop()
 
 genai.configure(api_key=GEMINI_API_KEY)
-# create and reuse model instance where possible
+
 try:
     GEMINI_MODEL = genai.GenerativeModel("gemini-pro")
 except Exception:
     GEMINI_MODEL = None
 
-# -------------------- FUNCTIONS --------------------
 
 def extract_text_from_pdf(pdf_file):
     text = ""
@@ -56,7 +53,6 @@ def chunk_text(text, chunk_size=3000):
     return [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
 
 
-# -------------------- GEMINI FUNCTION --------------------
 def gemini_generate(chunk):
     if GEMINI_MODEL is None:
         raise RuntimeError("Gemini model unavailable")
@@ -87,12 +83,10 @@ TEXT:
     return text
 
 
-# -------------------- HUGGINGFACE FALLBACK FUNCTION --------------------
 def hf_generate(chunk):
     if not HF_API_KEY:
         raise RuntimeError("HF API key not configured for fallback")
 
-    # Use the HF inference endpoint for model text generation
     API_URL = "https://router.huggingface.co/v1"
     headers = {"Authorization": f"Bearer {HF_API_KEY}"}
     payload = {
@@ -116,7 +110,7 @@ TEXT:
     resp.raise_for_status()
 
     resp_json = resp.json()
-    # handle various response shapes
+
     if isinstance(resp_json, list) and len(resp_json) and isinstance(resp_json[0], dict):
         gen_text = resp_json[0].get("generated_text", "")
     elif isinstance(resp_json, dict) and "generated_text" in resp_json:
@@ -124,18 +118,17 @@ TEXT:
     else:
         gen_text = resp.text
 
-    # try strict JSON first, else try to extract JSON array substring
+
     try:
         return json.loads(gen_text)
     except Exception:
         m = re.search(r"(\[\s*\{.*?\}\s*\])", gen_text, re.S)
         if m:
             return json.loads(m.group(1))
-        # as a last resort, return the raw text so caller can inspect
+
         return gen_text
 
 
-# -------------------- SMART AUTO-FALLBACK --------------------
 def generate_questions(chunks):
     questions = []
 
@@ -152,23 +145,21 @@ def generate_questions(chunks):
             try:
                 parsed = json.loads(text)
             except Exception:
-                # try to extract JSON array substring
+
                 m = re.search(r"(\[\s*\{.*?\}\s*\])", text, re.S)
                 if m:
                     parsed = json.loads(m.group(1))
                 else:
-                    # couldn't parse JSON — surface raw response for debugging and skip
+ 
                     st.error("Gemini raw response (non-JSON):")
                     st.code(text[:1000])
                     raise
 
-            # if parsed is a list of strings (model returned JSON array of JSON-strings), normalize
             if isinstance(parsed, list):
                 for item in parsed:
                     if isinstance(item, dict):
                         questions.append(item)
                     elif isinstance(item, str):
-                        # try to parse the string as JSON
                         try:
                             maybe = json.loads(item)
                             if isinstance(maybe, dict):
@@ -176,7 +167,7 @@ def generate_questions(chunks):
                                 continue
                         except Exception:
                             pass
-                        # fallback: store as question text
+
                         questions.append({"question": item, "options": [], "correct_answer": ""})
             else:
                 raise ValueError("Parsed Gemini output is not a list")
@@ -200,7 +191,7 @@ def generate_questions(chunks):
     return questions
 
 
-# -------------------- UI FLOW --------------------
+
 uploaded_file = st.file_uploader("📂 Upload your PDF", type=["pdf"])
 
 if uploaded_file:
@@ -222,7 +213,7 @@ if uploaded_file:
 
             st.success(f"🎉 Generated {len(questions)} questions")
 
-            # Show preview
+
             st.subheader("📝 Preview Questions")
             for i, q in enumerate(questions[:5]):
                 question_text = q.get("question", "")
